@@ -1,0 +1,376 @@
+# openIMIS Backend Form Builder Module
+
+The Form Builder module enables flexible form design and data collection within the openIMIS social protection management system, supporting both standalone forms and dynamic extensions to existing pages.
+
+## Overview
+
+This module provides the following key functionalities:
+
+- **Dynamic Form Design**: Create and manage form definitions with drag-and-drop controls
+- **Standalone Forms**: Full-page forms with submission tracking and workflow integration
+- **Page Extensions**: Add custom fields to existing openIMIS pages via contribution points
+- **Control Registry**: Extensible system for registering form controls from other modules
+- **Data Storage**: Flexible storage in dedicated tables or model extensions via json_ext
+- **Permission System**: Granular access control for form design, submission, and viewing
+
+## Architecture
+
+### Core Components
+
+1. **FormDefinition Model**: Stores form schemas and metadata
+2. **FormSubmission Model**: Tracks standalone form submissions
+3. **Control Registry**: Extensible system for form controls (loose coupling)
+4. **Extension Service**: Handles data storage in model json_ext fields
+5. **GraphQL API**: RESTful API for form management and submissions
+
+### Data Flow
+
+```
+Form Designer (FE)
+       ↓
+FormDefinition (JSON Schema)
+       ↓
+Form Rendering (FE Controls)
+       ↓
+Form Submission
+       ↓
+Standalone: FormSubmission Table
+Extension: Target Model.json_ext
+```
+
+## Form Types
+
+### Standalone Forms
+- Full-page forms accessible via menu/submenu
+- Data stored in dedicated `FormSubmission` table
+- Support for ETL processing and workflow triggers
+- Status tracking (draft, submitted, processed, rejected)
+
+### Page Extensions
+- Add fields to existing openIMIS pages
+- Data stored in target model's `json_ext` field
+- No dedicated submission tracking
+- Immediate data persistence
+
+## Control System
+
+### Control Registration
+Modules can register form controls through a contribution mechanism:
+
+```python
+# In other modules (e.g., individual, policy)
+FORM_CONTROLS = [
+    {
+        'type': 'individual_name',
+        'display': 'Individual Name',
+        'is_default': True,
+        'component': 'IndividualNameControl'
+    },
+    {
+        'type': 'policy_number',
+        'display': 'Policy Number',
+        'is_default': False,
+        'component': 'PolicyNumberControl'
+    }
+]
+```
+
+### Control Types
+- **Basic Controls**: boolean, text, list, numeric, date
+- **Advanced Controls**: Contributed by other modules (FK relationships, custom widgets)
+- **Validation**: Client-side validation rules defined in schema
+
+## Configuration
+
+### Form Definition Structure
+
+Each form definition includes:
+
+- **Metadata**: name, description, form type, target model
+- **Schema**: JSON definition of form structure and controls
+- **Entry Point**: Menu key (standalone) or contribution point (extension)
+- **Submit Actions**: ETL mappings, workflow triggers (standalone only)
+
+### Schema Format
+
+```json
+{
+  "title": "Individual Registration",
+  "type": "object",
+  "properties": {
+    "firstName": {
+      "type": "string",
+      "title": "First Name",
+      "control": "text",
+      "required": true
+    },
+    "lastName": {
+      "type": "string",
+      "title": "Last Name",
+      "control": "text",
+      "required": true
+    },
+    "dateOfBirth": {
+      "type": "string",
+      "format": "date",
+      "title": "Date of Birth",
+      "control": "date"
+    },
+    "gender": {
+      "type": "string",
+      "enum": ["MALE", "FEMALE", "OTHER"],
+      "title": "Gender",
+      "control": "select"
+    }
+  }
+}
+```
+
+## API Usage
+
+### GraphQL Queries
+
+#### List Form Definitions
+```graphql
+query {
+  formDefinitions {
+    edges {
+      node {
+        id
+        name
+        description
+        formType
+        targetModel
+        entryPoint
+        createdBy {
+          username
+        }
+      }
+    }
+  }
+}
+```
+
+#### Get Form Submissions
+```graphql
+query {
+  formSubmissions(formId: "uuid") {
+    edges {
+      node {
+        id
+        submissionData
+        status
+        submittedBy {
+          username
+        }
+        dateSubmitted
+      }
+    }
+  }
+}
+```
+
+### GraphQL Mutations
+
+#### Create Form Definition
+```graphql
+mutation {
+  createFormDefinition(input: {
+    name: "Individual Registration"
+    description: "Form for registering new individuals"
+    formType: "standalone"
+    schema: "{\"title\": \"Individual Registration\", \"type\": \"object\", \"properties\": {...}}"
+    entryPoint: "individual_registration"
+    submitActions: "{\"etl_mapping\": {...}, \"workflows\": [...]}"
+  }) {
+    formDefinition {
+      id
+      name
+      formType
+    }
+    clientMutationId
+  }
+}
+```
+
+#### Submit Form
+```graphql
+mutation {
+  submitForm(input: {
+    formId: "uuid"
+    submissionData: "{\"firstName\": \"John\", \"lastName\": \"Doe\"}"
+  }) {
+    formSubmission {
+      id
+      status
+      submissionData
+    }
+    clientMutationId
+  }
+}
+```
+
+#### Save Extension Data
+```graphql
+mutation {
+  saveFormExtension(input: {
+    formId: "uuid"
+    targetModel: "individual"
+    targetId: "uuid"
+    extensionData: "{\"customField\": \"value\"}"
+  }) {
+    success
+    clientMutationId
+  }
+}
+```
+
+## Permission System
+
+The module defines 5 permission groups:
+
+- **Form Designer** (151001): Create, edit, delete form definitions
+- **Form Definition Viewer** (151002): Read form definitions for rendering
+- **Form Submitter** (151003): Submit standalone forms
+- **Form Submission Viewer** (151004): View form submissions
+- **Form Extension Writer** (151005): Write data to model json_ext
+
+## Extension Mechanism
+
+### Model Extensions
+Extensions store data in the target model's `json_ext` field:
+
+```python
+# Target model (e.g., Individual)
+class Individual(models.Model):
+    # ... standard fields
+    json_ext = JSONField(blank=True, null=True)
+
+# Extension data structure
+{
+  "form_builder": {
+    "form_uuid": {
+      "field_name": "field_value",
+      "another_field": "another_value"
+    }
+  }
+}
+```
+
+### Contribution Points
+Extensions integrate at predefined contribution points:
+- `individual_detail`: Individual detail page
+- `policy_detail`: Policy detail page
+- `claim_detail`: Claim detail page
+
+## Control Contribution
+
+### Registering Controls
+Other modules can contribute controls:
+
+```python
+# In module's __init__.py or apps.py
+from form_builder.registry import register_control
+
+register_control({
+    'type': 'custom_control',
+    'display': 'Custom Control',
+    'is_default': False,
+    'module': 'my_module',
+    'component': 'MyCustomControl'
+})
+```
+
+### Control Resolution
+The system resolves controls by:
+1. Type matching against registered controls
+2. Fallback to default controls for basic types
+3. FE component loading based on registration
+
+## Data Processing
+
+### ETL Integration
+Standalone forms support ETL processing:
+
+```json
+{
+  "etl_mapping": {
+    "target_table": "individual",
+    "field_mapping": {
+      "firstName": "first_name",
+      "lastName": "last_name"
+    },
+    "transformations": {
+      "dateOfBirth": {
+        "type": "date_format",
+        "input_format": "%Y-%m-%d"
+      }
+    }
+  }
+}
+```
+
+### Workflow Integration
+Forms can trigger workflows and calculation rules:
+
+```json
+{
+  "workflows": [
+    {
+      "name": "individual_registration_workflow",
+      "parameters": {
+        "individual_id": "{{submission.id}}"
+      }
+    }
+  ]
+}
+```
+
+## Security
+
+- All API endpoints require authentication
+- Role-based permissions for different operations
+- Input validation and sanitization
+- Audit logging of form operations
+- Secure storage of sensitive form data
+
+## Dependencies
+
+- Django 3.2+
+- Graphene-Django
+- openIMIS Core module
+
+## Installation
+
+1. Install the package:
+```bash
+pip install openimis-be-form_builder
+```
+
+2. Add to Django INSTALLED_APPS:
+```python
+INSTALLED_APPS = [
+    # ... other apps
+    'form_builder',
+]
+```
+
+3. Run migrations:
+```bash
+python manage.py migrate form_builder
+```
+
+## Testing
+
+Run the test suite:
+```bash
+python manage.py test form_builder
+```
+
+## Contributing
+
+Please read the main openIMIS contributing guidelines for details on our code of conduct and the process for submitting pull requests.
+
+## License
+
+This project is licensed under the GNU AGPL v3 License - see the LICENSE file for details.

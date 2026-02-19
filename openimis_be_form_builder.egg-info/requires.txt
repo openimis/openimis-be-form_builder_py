@@ -1,0 +1,5 @@
+django
+django-db-signals
+djangorestframework
+graphene-django
+openimis-be-core
