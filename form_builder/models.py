@@ -1,9 +1,9 @@
 from django.db import models
 from django.conf import settings
-from core.models import OpenIMISModel
+from core.models import OpenIMISBusinessModel
 
 
-class FormDefinition(OpenIMISModel):
+class FormDefinition(OpenIMISBusinessModel):
     """
     Stores form definitions created by the form designer.
     The schema field contains the full form definition as an opaque JSON blob.
@@ -38,10 +38,10 @@ class FormDefinition(OpenIMISModel):
         verbose_name_plural = "Form Definitions"
 
     def __str__(self):
-        return f"{self.name} ({self.form_type})"
+        return self.name
 
 
-class FormSubmission(OpenIMISModel):
+class FormSubmission(OpenIMISBusinessModel):
     """
     Stores submitted data for standalone forms only.
     Extensions write directly to model.json_ext.
@@ -61,7 +61,7 @@ class FormSubmission(OpenIMISModel):
             ('processed', 'Processed'),
             ('rejected', 'Rejected')
         ],
-        default='submitted'
+        default='draft'
     )
     date_submitted = models.DateTimeField(null=True, blank=True)
 
