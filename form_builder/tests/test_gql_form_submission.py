@@ -1,6 +1,7 @@
 from core.models.openimis_graphql_test_case import openIMISGraphQLTestCase, BaseTestContext
 from core.test_helpers import create_test_interactive_user
 from django.contrib.auth.models import AnonymousUser
+from core.models.base_mutation import MutationLog
 from ..models import FormDefinition, FormSubmission
 
 
@@ -24,6 +25,22 @@ class FormSubmissionGQLTest(openIMISGraphQLTestCase):
             form_type="standalone",
             schema={"fields": []}
         )
+
+    def assert_mutation_success(self, uuid):
+        mutation_result = self.get_mutation_result(uuid, self.admin_token, internal=True)
+        mutation_status = mutation_result['data']['mutationLogs']['edges'][0]['node']['status']
+        self.assertEqual(
+            mutation_status,
+            MutationLog.SUCCESS,
+            mutation_result['data']['mutationLogs']['edges'][0]['node']['error']
+        )
+
+    def assert_mutation_error(self, uuid, expected_error):
+        try:
+            self.get_mutation_result(uuid, self.admin_token, internal=True)
+            self.fail(f"Expected mutation error containing '{expected_error}' but mutation succeeded")
+        except ValueError as e:
+            self.assertIn(expected_error, str(e))
 
     def test_query_form_submission_authenticated(self):
         """Test formSubmission query returns results for authenticated user"""
@@ -85,15 +102,7 @@ class FormSubmissionGQLTest(openIMISGraphQLTestCase):
         mutation = """
         mutation createFormSubmission($input: CreateFormSubmissionMutationInput!) {
             createFormSubmission(input: $input) {
-                formSubmission {
-                    id
-                    data
-                    status
-                    formDefinition {
-                        id
-                        name
-                    }
-                }
+                internalId
             }
         }
         """
@@ -106,34 +115,25 @@ class FormSubmissionGQLTest(openIMISGraphQLTestCase):
             }
         }
 
-        response = self.query(
+        response = self.send_mutation_raw(
             mutation,
-            variables=variables,
-            headers={"HTTP_AUTHORIZATION": f"Bearer {self.admin_token}"}
+            self.admin_token,
+            variables_param=variables,
         )
-        self.assertResponseNoErrors(response)
 
-        content = response.json()
-        submission = content['data']['createFormSubmission']['formSubmission']
-        self.assertEqual(submission['status'], "draft")
-        self.assertEqual(submission['formDefinition']['name'], "Test Form for Submissions")
+        mutation_log = response['data']['mutationLogs']['edges'][0]['node']
+        self.assertEqual(mutation_log['status'], MutationLog.SUCCESS)
 
         # Verify in database
-        db_submission = FormSubmission.objects.get(id=submission['id'])
-        self.assertEqual(db_submission.data, {"field1": "test value", "field2": 123})
+        db_submission = FormSubmission.objects.filter(form=self.form_def, status='draft').latest('id')
+        self.assertEqual(db_submission.submission_data, {"field1": "test value", "field2": 123})
 
     def test_create_form_submission_mutation_submitted_status(self):
         """Test createFormSubmission with submitted status sets submitted_by"""
         mutation = """
         mutation createFormSubmission($input: CreateFormSubmissionMutationInput!) {
             createFormSubmission(input: $input) {
-                formSubmission {
-                    id
-                    status
-                    submittedBy {
-                        username
-                    }
-                }
+                internalId
             }
         }
         """
@@ -146,26 +146,26 @@ class FormSubmissionGQLTest(openIMISGraphQLTestCase):
             }
         }
 
-        response = self.query(
+        response = self.send_mutation_raw(
             mutation,
-            variables=variables,
-            headers={"HTTP_AUTHORIZATION": f"Bearer {self.admin_token}"}
+            self.admin_token,
+            variables_param=variables,
         )
-        self.assertResponseNoErrors(response)
 
-        content = response.json()
-        submission = content['data']['createFormSubmission']['formSubmission']
-        self.assertEqual(submission['status'], "submitted")
-        self.assertEqual(submission['submittedBy']['username'], self.admin_username)
+        mutation_log = response['data']['mutationLogs']['edges'][0]['node']
+        self.assertEqual(mutation_log['status'], MutationLog.SUCCESS)
+
+        # Verify submitted_by in database
+        db_submission = FormSubmission.objects.filter(form=self.form_def, status='submitted').latest('id')
+        self.assertIsNotNone(db_submission.submitted_by)
+        self.assertEqual(db_submission.submitted_by.username, self.admin_username)
 
     def test_create_form_submission_mutation_invalid_form_definition(self):
         """Test createFormSubmission fails with invalid form_definition_id"""
         mutation = """
         mutation createFormSubmission($input: CreateFormSubmissionMutationInput!) {
             createFormSubmission(input: $input) {
-                formSubmission {
-                    id
-                }
+                internalId
             }
         }
         """
@@ -177,24 +177,22 @@ class FormSubmissionGQLTest(openIMISGraphQLTestCase):
             }
         }
 
-        response = self.query(
+        response = self.send_mutation_raw(
             mutation,
-            variables=variables,
-            headers={"HTTP_AUTHORIZATION": f"Bearer {self.admin_token}"}
+            self.admin_token,
+            variables_param=variables,
+            follow=False,
         )
 
-        content = response.json()
-        self.assertIn('errors', content)
-        self.assertIn("FormDefinition not found", content['errors'][0]['message'])
+        internal_id = response['data']['createFormSubmission']['internalId']
+        self.assert_mutation_error(internal_id, "FormDefinition not found")
 
     def test_create_form_submission_mutation_unauthenticated(self):
         """Test createFormSubmission mutation fails for anonymous user"""
         mutation = """
         mutation createFormSubmission($input: CreateFormSubmissionMutationInput!) {
             createFormSubmission(input: $input) {
-                formSubmission {
-                    id
-                }
+                internalId
             }
         }
         """
@@ -206,10 +204,16 @@ class FormSubmissionGQLTest(openIMISGraphQLTestCase):
             }
         }
 
-        response = self.query(mutation, variables=variables)
-        content = response.json()
-        self.assertIn('errors', content)
-        self.assertEqual(content['errors'][0]['message'], "Authentication required")
+        # Send with empty token (anonymous)
+        response = self.send_mutation_raw(
+            mutation,
+            token='',
+            variables_param=variables,
+            follow=False,
+        )
+
+        internal_id = response['data']['createFormSubmission']['internalId']
+        self.assert_mutation_error(internal_id, "User must be authenticated")
 
     def test_update_form_submission_mutation_success(self):
         """Test updateFormSubmission mutation updates a record"""
@@ -223,11 +227,7 @@ class FormSubmissionGQLTest(openIMISGraphQLTestCase):
         mutation = """
         mutation updateFormSubmission($input: UpdateFormSubmissionMutationInput!) {
             updateFormSubmission(input: $input) {
-                formSubmission {
-                    id
-                    data
-                    status
-                }
+                internalId
             }
         }
         """
@@ -240,20 +240,18 @@ class FormSubmissionGQLTest(openIMISGraphQLTestCase):
             }
         }
 
-        response = self.query(
+        response = self.send_mutation_raw(
             mutation,
-            variables=variables,
-            headers={"HTTP_AUTHORIZATION": f"Bearer {self.admin_token}"}
+            self.admin_token,
+            variables_param=variables,
         )
-        self.assertResponseNoErrors(response)
 
-        content = response.json()
-        updated_submission = content['data']['updateFormSubmission']['formSubmission']
-        self.assertEqual(updated_submission['status'], "submitted")
+        mutation_log = response['data']['mutationLogs']['edges'][0]['node']
+        self.assertEqual(mutation_log['status'], MutationLog.SUCCESS)
 
         # Verify in database
         submission.refresh_from_db()
-        self.assertEqual(submission.data, {"updated": "data"})
+        self.assertEqual(submission.submission_data, {"updated": "data"})
         self.assertEqual(submission.status, "submitted")
         self.assertEqual(submission.submitted_by, self.admin_user)
 
@@ -262,9 +260,7 @@ class FormSubmissionGQLTest(openIMISGraphQLTestCase):
         mutation = """
         mutation updateFormSubmission($input: UpdateFormSubmissionMutationInput!) {
             updateFormSubmission(input: $input) {
-                formSubmission {
-                    id
-                }
+                internalId
             }
         }
         """
@@ -276,15 +272,15 @@ class FormSubmissionGQLTest(openIMISGraphQLTestCase):
             }
         }
 
-        response = self.query(
+        response = self.send_mutation_raw(
             mutation,
-            variables=variables,
-            headers={"HTTP_AUTHORIZATION": f"Bearer {self.admin_token}"}
+            self.admin_token,
+            variables_param=variables,
+            follow=False,
         )
 
-        content = response.json()
-        self.assertIn('errors', content)
-        self.assertIn("FormSubmission not found", content['errors'][0]['message'])
+        internal_id = response['data']['updateFormSubmission']['internalId']
+        self.assert_mutation_error(internal_id, "does not exist")
 
     def test_delete_form_submission_mutation_draft_success(self):
         """Test deleteFormSubmission mutation succeeds for draft submissions"""
@@ -298,7 +294,7 @@ class FormSubmissionGQLTest(openIMISGraphQLTestCase):
         mutation = """
         mutation deleteFormSubmission($input: DeleteFormSubmissionMutationInput!) {
             deleteFormSubmission(input: $input) {
-                success
+                internalId
             }
         }
         """
@@ -309,15 +305,14 @@ class FormSubmissionGQLTest(openIMISGraphQLTestCase):
             }
         }
 
-        response = self.query(
+        response = self.send_mutation_raw(
             mutation,
-            variables=variables,
-            headers={"HTTP_AUTHORIZATION": f"Bearer {self.admin_token}"}
+            self.admin_token,
+            variables_param=variables,
         )
-        self.assertResponseNoErrors(response)
 
-        content = response.json()
-        self.assertTrue(content['data']['deleteFormSubmission']['success'])
+        mutation_log = response['data']['mutationLogs']['edges'][0]['node']
+        self.assertEqual(mutation_log['status'], MutationLog.SUCCESS)
 
         # Verify soft delete
         submission.refresh_from_db()
@@ -336,7 +331,7 @@ class FormSubmissionGQLTest(openIMISGraphQLTestCase):
         mutation = """
         mutation deleteFormSubmission($input: DeleteFormSubmissionMutationInput!) {
             deleteFormSubmission(input: $input) {
-                success
+                internalId
             }
         }
         """
@@ -347,15 +342,15 @@ class FormSubmissionGQLTest(openIMISGraphQLTestCase):
             }
         }
 
-        response = self.query(
+        response = self.send_mutation_raw(
             mutation,
-            variables=variables,
-            headers={"HTTP_AUTHORIZATION": f"Bearer {self.admin_token}"}
+            self.admin_token,
+            variables_param=variables,
+            follow=False,
         )
 
-        content = response.json()
-        self.assertIn('errors', content)
-        self.assertIn("Only draft submissions can be deleted", content['errors'][0]['message'])
+        internal_id = response['data']['deleteFormSubmission']['internalId']
+        self.assert_mutation_error(internal_id, "Only draft submissions can be deleted")
 
     def test_form_submission_filtering_by_status(self):
         """Test formSubmission query filtering by status"""

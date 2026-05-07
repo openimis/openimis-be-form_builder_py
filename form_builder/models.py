@@ -24,7 +24,9 @@ class FormDefinition(OpenIMISBusinessModel):
     schema = models.JSONField(help_text="Full form definition JSON (opaque to BE)")
     entry_point = models.CharField(
         max_length=200,
-        help_text="Standalone: submenu key; Extension: contribution point key"
+        help_text="Standalone: submenu key; Extension: contribution point key",
+        blank=True,
+        null=True
     )
     submit_actions = models.JSONField(
         blank=True,

@@ -9,6 +9,9 @@ from .models import FormDefinition, FormSubmission
 
 
 class FormDefinitionGQLType(DjangoObjectType):
+    form_type = graphene.String()
+    uuid = graphene.UUID(source='uuid')
+
     class Meta:
         model = FormDefinition
         interfaces = (graphene.relay.Node,)
@@ -26,18 +29,34 @@ class FormDefinitionGQLType(DjangoObjectType):
 
 
 class FormSubmissionGQLType(DjangoObjectType):
+    status = graphene.String()
+    data = graphene.JSONString()
+    form_definition = graphene.Field(FormDefinitionGQLType)
+    uuid = graphene.String(source='uuid')
+
     class Meta:
         model = FormSubmission
         interfaces = (graphene.relay.Node,)
         filter_fields = {
+            'uuid': ['exact'],
             'status': ['exact'],
             'date_submitted': ['gte', 'lte'],
             'submitted_by': ['exact'],
             'form': ['exact'],
+            'form__uuid': ['exact'],
             'form__name': ['exact', 'icontains'],
             'form__form_type': ['exact'],
         }
         connection_class = ExtendedConnection
+
+    def resolve_data(self, info):
+        return self.submission_data
+
+    def resolve_form_definition(self, info):
+        return self.form
+
+    def resolve_submitted_by(self, info):
+        return self.submitted_by
 
     @classmethod
     def get_queryset(cls, queryset, info):

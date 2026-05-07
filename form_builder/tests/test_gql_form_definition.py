@@ -1,6 +1,7 @@
 from core.models.openimis_graphql_test_case import openIMISGraphQLTestCase, BaseTestContext
 from core.test_helpers import create_test_interactive_user
 from django.contrib.auth.models import AnonymousUser
+from core.models.base_mutation import MutationLog
 from ..models import FormDefinition
 
 
@@ -17,6 +18,26 @@ class FormDefinitionGQLTest(openIMISGraphQLTestCase):
         )
         cls.admin_token_context = BaseTestContext(user=cls.admin_user)
         cls.admin_token = cls.admin_token_context.get_jwt()
+
+    def setUp(self):
+        super().setUp()
+        FormDefinition.objects.all().delete()
+
+    def assert_mutation_success(self, uuid):
+        mutation_result = self.get_mutation_result(uuid, self.admin_token, internal=True)
+        mutation_status = mutation_result['data']['mutationLogs']['edges'][0]['node']['status']
+        self.assertEqual(
+            mutation_status,
+            MutationLog.SUCCESS,
+            mutation_result['data']['mutationLogs']['edges'][0]['node']['error']
+        )
+
+    def assert_mutation_error(self, uuid, expected_error):
+        try:
+            self.get_mutation_result(uuid, self.admin_token, internal=True)
+            self.fail(f"Expected mutation error containing '{expected_error}' but mutation succeeded")
+        except ValueError as e:
+            self.assertIn(expected_error, str(e))
 
     def test_query_form_definition_authenticated(self):
         """Test formDefinition query returns results for authenticated user"""
@@ -80,14 +101,7 @@ class FormDefinitionGQLTest(openIMISGraphQLTestCase):
         mutation = """
         mutation createFormDefinition($input: CreateFormDefinitionMutationInput!) {
             createFormDefinition(input: $input) {
-                formDefinition {
-                    id
-                    name
-                    description
-                    formType
-                    schema
-                }
-                clientMutationId
+                internalId
             }
         }
         """
@@ -102,31 +116,26 @@ class FormDefinitionGQLTest(openIMISGraphQLTestCase):
             }
         }
 
-        response = self.query(
+        response = self.send_mutation_raw(
             mutation,
-            variables=variables,
-            headers={"HTTP_AUTHORIZATION": f"Bearer {self.admin_token}"}
+            self.admin_token,
+            variables_param=variables,
         )
-        self.assertResponseNoErrors(response)
 
-        content = response.json()
-        form_def = content['data']['createFormDefinition']['formDefinition']
-        self.assertEqual(form_def['name'], "New Test Form")
-        self.assertEqual(form_def['formType'], "standalone")
-
+        mutation_log = response['data']['mutationLogs']['edges'][0]['node']
+        self.assertEqual(mutation_log['status'], MutationLog.SUCCESS)
         # Verify in database
-        db_form = FormDefinition.objects.get(name="New Test Form")
+        db_form = FormDefinition.objects.filter(name="New Test Form").first()
+        self.assertIsNotNone(db_form)
         self.assertEqual(db_form.description, "A newly created test form")
+        self.assertEqual(db_form.form_type, "standalone")
 
     def test_create_form_definition_mutation_missing_required(self):
         """Test createFormDefinition mutation fails with missing required fields"""
         mutation = """
         mutation createFormDefinition($input: CreateFormDefinitionMutationInput!) {
             createFormDefinition(input: $input) {
-                formDefinition {
-                    id
-                    name
-                }
+                internalId
             }
         }
         """
@@ -134,49 +143,55 @@ class FormDefinitionGQLTest(openIMISGraphQLTestCase):
         variables = {
             "input": {
                 "name": "Incomplete Form",
-                # Missing schema
+                # Missing schema - should fail in service validation
                 "formType": "standalone"
             }
         }
 
-        response = self.query(
+        # Use follow=False to get internalId, then check mutation log for error
+        response = self.send_mutation_raw(
             mutation,
-            variables=variables,
-            headers={"HTTP_AUTHORIZATION": f"Bearer {self.admin_token}"}
+            self.admin_token,
+            variables_param=variables,
+            follow=False,
         )
 
-        content = response.json()
-        self.assertIn('errors', content)
-        self.assertIn("Name and schema are required", content['errors'][0]['message'])
+        internal_id = response['data']['createFormDefinition']['internalId']
+        self.assert_mutation_error(internal_id, "Name and schema are required")
 
     def test_create_form_definition_mutation_unauthenticated(self):
         """Test createFormDefinition mutation fails for anonymous user"""
         mutation = """
         mutation createFormDefinition($input: CreateFormDefinitionMutationInput!) {
             createFormDefinition(input: $input) {
-                formDefinition {
-                    id
-                }
+                internalId
             }
         }
         """
 
         variables = {
             "input": {
-                "name": "Unauthorized Form",
+                "name": "Should Fail",
                 "formType": "standalone",
                 "schema": '{"fields": []}'
             }
         }
 
-        response = self.query(mutation, variables=variables)
-        content = response.json()
-        self.assertIn('errors', content)
-        self.assertEqual(content['errors'][0]['message'], "Authentication required")
+        # Send with empty token (anonymous), get internalId from raw response
+        response = self.send_mutation_raw(
+            mutation,
+            token='',
+            variables_param=variables,
+            follow=False,
+        )
+
+        internal_id = response['data']['createFormDefinition']['internalId']
+        # Mutation log should contain an auth error
+        self.assert_mutation_error(internal_id, "User must be authenticated")
 
     def test_update_form_definition_mutation_success(self):
         """Test updateFormDefinition mutation updates a record"""
-        # Create initial form
+        # Create form to update
         form_def = FormDefinition.objects.create(
             name="Original Form",
             description="Original description",
@@ -187,11 +202,7 @@ class FormDefinitionGQLTest(openIMISGraphQLTestCase):
         mutation = """
         mutation updateFormDefinition($input: UpdateFormDefinitionMutationInput!) {
             updateFormDefinition(input: $input) {
-                formDefinition {
-                    id
-                    name
-                    description
-                }
+                internalId
             }
         }
         """
@@ -204,26 +215,26 @@ class FormDefinitionGQLTest(openIMISGraphQLTestCase):
             }
         }
 
-        response = self.query(
+        response = self.send_mutation_raw(
             mutation,
-            variables=variables,
-            headers={"HTTP_AUTHORIZATION": f"Bearer {self.admin_token}"}
+            self.admin_token,
+            variables_param=variables,
         )
-        self.assertResponseNoErrors(response)
 
-        content = response.json()
-        updated_form = content['data']['updateFormDefinition']['formDefinition']
-        self.assertEqual(updated_form['name'], "Updated Form")
-        self.assertEqual(updated_form['description'], "Updated description")
+        mutation_log = response['data']['mutationLogs']['edges'][0]['node']
+        self.assertEqual(mutation_log['status'], MutationLog.SUCCESS)
+
+        # Verify in database
+        form_def.refresh_from_db()
+        self.assertEqual(form_def.name, "Updated Form")
+        self.assertEqual(form_def.description, "Updated description")
 
     def test_update_form_definition_mutation_not_found(self):
         """Test updateFormDefinition mutation fails for non-existent ID"""
         mutation = """
         mutation updateFormDefinition($input: UpdateFormDefinitionMutationInput!) {
             updateFormDefinition(input: $input) {
-                formDefinition {
-                    id
-                }
+                internalId
             }
         }
         """
@@ -235,15 +246,15 @@ class FormDefinitionGQLTest(openIMISGraphQLTestCase):
             }
         }
 
-        response = self.query(
+        response = self.send_mutation_raw(
             mutation,
-            variables=variables,
-            headers={"HTTP_AUTHORIZATION": f"Bearer {self.admin_token}"}
+            self.admin_token,
+            variables_param=variables,
+            follow=False,
         )
 
-        content = response.json()
-        self.assertIn('errors', content)
-        self.assertIn("FormDefinition not found", content['errors'][0]['message'])
+        internal_id = response['data']['updateFormDefinition']['internalId']
+        self.assert_mutation_error(internal_id, "does not exist")
 
     def test_delete_form_definition_mutation_success(self):
         """Test deleteFormDefinition mutation soft-deletes a record"""
@@ -257,7 +268,7 @@ class FormDefinitionGQLTest(openIMISGraphQLTestCase):
         mutation = """
         mutation deleteFormDefinition($input: DeleteFormDefinitionMutationInput!) {
             deleteFormDefinition(input: $input) {
-                success
+                internalId
             }
         }
         """
@@ -268,15 +279,14 @@ class FormDefinitionGQLTest(openIMISGraphQLTestCase):
             }
         }
 
-        response = self.query(
+        response = self.send_mutation_raw(
             mutation,
-            variables=variables,
-            headers={"HTTP_AUTHORIZATION": f"Bearer {self.admin_token}"}
+            self.admin_token,
+            variables_param=variables,
         )
-        self.assertResponseNoErrors(response)
 
-        content = response.json()
-        self.assertTrue(content['data']['deleteFormDefinition']['success'])
+        mutation_log = response['data']['mutationLogs']['edges'][0]['node']
+        self.assertEqual(mutation_log['status'], MutationLog.SUCCESS)
 
         # Verify soft delete
         form_def.refresh_from_db()
@@ -287,12 +297,7 @@ class FormDefinitionGQLTest(openIMISGraphQLTestCase):
         mutation = """
         mutation createFormDefinition($input: CreateFormDefinitionMutationInput!) {
             createFormDefinition(input: $input) {
-                formDefinition {
-                    id
-                    name
-                    formType
-                    targetModel
-                }
+                internalId
             }
         }
         """
@@ -306,14 +311,37 @@ class FormDefinitionGQLTest(openIMISGraphQLTestCase):
             }
         }
 
-        response = self.query(
+        response = self.send_mutation_raw(
             mutation,
-            variables=variables,
-            headers={"HTTP_AUTHORIZATION": f"Bearer {self.admin_token}"}
+            self.admin_token,
+            variables_param=variables,
         )
+
+        mutation_log = response['data']['mutationLogs']['edges'][0]['node']
+        self.assertEqual(mutation_log['status'], MutationLog.SUCCESS)
+
+        # Query the created object to verify its properties
+        query = """
+        query {
+            formDefinition {
+                edges {
+                    node {
+                        id
+                        name
+                        formType
+                        targetModel
+                    }
+                }
+            }
+        }
+        """
+
+        response = self.query(query, headers={"HTTP_AUTHORIZATION": f"Bearer {self.admin_token}"})
         self.assertResponseNoErrors(response)
 
         content = response.json()
-        form_def = content['data']['createFormDefinition']['formDefinition']
+        forms = content['data']['formDefinition']['edges']
+        self.assertEqual(len(forms), 1)
+        form_def = forms[0]['node']
         self.assertEqual(form_def['formType'], "extension")
         self.assertEqual(form_def['targetModel'], "Individual")

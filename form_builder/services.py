@@ -1,8 +1,10 @@
 from django.contrib.auth.models import AnonymousUser
 from django.core.exceptions import PermissionDenied
 from django.db import transaction
+from django.utils import timezone
 
 from core.services import BaseService
+from .apps import FormBuilderConfig
 from .models import FormDefinition, FormSubmission
 
 
@@ -18,14 +20,14 @@ class FormDefinitionService(BaseService):
             raise PermissionDenied("Authentication required")
 
         # Check permissions
-        if not self.user.has_perm('151001'):  # gql_form_designer_perms from apps.py
+        if not self.user.has_perms(FormBuilderConfig.gql_form_designer_perms) and not getattr(self.user, 'is_superuser', False):
             raise PermissionDenied("Permission denied")
 
         # Extract name from schema if not provided
         if not name and schema and isinstance(schema, dict) and 'name' in schema:
             name = schema['name']
 
-        if not name or not schema:
+        if not name or schema is None:
             raise ValueError("Name and schema are required")
 
         if form_type not in ['standalone', 'extension']:
@@ -51,7 +53,7 @@ class FormDefinitionService(BaseService):
             raise PermissionDenied("Authentication required")
 
         # Check permissions
-        if not self.user.has_perm('151001'):  # gql_form_designer_perms from apps.py
+        if not self.user.has_perms(FormBuilderConfig.gql_form_designer_perms) and not getattr(self.user, 'is_superuser', False):
             raise PermissionDenied("Permission denied")
 
         if not form_definition:
@@ -81,13 +83,15 @@ class FormDefinitionService(BaseService):
             raise PermissionDenied("Authentication required")
 
         # Check permissions
-        if not self.user.has_perm('151001'):  # gql_form_designer_perms from apps.py
+        if not self.user.has_perms(FormBuilderConfig.gql_form_designer_perms) and not getattr(self.user, 'is_superuser', False):
             raise PermissionDenied("Permission denied")
 
         if not form_definition:
             raise ValueError("FormDefinition is required")
 
-        form_definition.delete()
+        # Soft delete by setting validity_to
+        form_definition.validity_to = timezone.now()
+        form_definition.save()
         return form_definition
 
 
@@ -101,6 +105,10 @@ class FormSubmissionService(BaseService):
         # Check authentication
         if not self.user or isinstance(self.user, AnonymousUser) or not self.user.id:
             raise PermissionDenied("Authentication required")
+
+        # Check permissions
+        if not self.user.has_perms(FormBuilderConfig.gql_form_submit_perms) and not getattr(self.user, 'is_superuser', False):
+            raise PermissionDenied("Permission denied")
 
         # Handle both parameter naming conventions
         form_def = form_definition or form
@@ -116,27 +124,40 @@ class FormSubmissionService(BaseService):
             form=form_def,
             submission_data=submission_data_final,
             status=status,
-            submitted_by=self.user if status == 'submitted' else None
+            submitted_by=self.user  # Always set submitted_by to the creator
         )
+        if status == 'submitted':
+            form_submission.date_submitted = timezone.now()
         form_submission.save()
         return form_submission
 
-    def update(self, form_submission, data=None, status=None):
+    def update(self, form_submission, data=None, status=None, submission_data=None):
         # Check authentication
         if not self.user or isinstance(self.user, AnonymousUser) or not self.user.id:
             raise PermissionDenied("Authentication required")
 
+        # Check permissions - use submit or designer perms
+        if not (self.user.has_perms(FormBuilderConfig.gql_form_submit_perms) or 
+                self.user.has_perms(FormBuilderConfig.gql_form_designer_perms)) and not getattr(self.user, 'is_superuser', False):
+            raise PermissionDenied("Permission denied")
+
         if not form_submission:
             raise ValueError("FormSubmission is required")
 
-        if data is not None:
-            form_submission.submission_data = data
+        # Handle both parameter naming conventions
+        data_final = submission_data or data
+
+        if data_final is not None:
+            form_submission.submission_data = data_final
         if status is not None:
             if status not in ['draft', 'submitted', 'processed', 'rejected']:
                 raise ValueError("Invalid status")
             form_submission.status = status
-            if status == 'submitted' and not form_submission.submitted_by:
-                form_submission.submitted_by = self.user
+            if status == 'submitted':
+                if not getattr(form_submission, 'date_submitted', None):
+                    form_submission.date_submitted = timezone.now()
+                if not form_submission.submitted_by:
+                    form_submission.submitted_by = self.user
 
         form_submission.save()
         return form_submission
@@ -145,6 +166,11 @@ class FormSubmissionService(BaseService):
         # Check authentication
         if not self.user or isinstance(self.user, AnonymousUser) or not self.user.id:
             raise PermissionDenied("Authentication required")
+
+        # Check permissions
+        if not (self.user.has_perms(FormBuilderConfig.gql_form_submit_perms) or 
+                self.user.has_perms(FormBuilderConfig.gql_form_designer_perms)) and not getattr(self.user, 'is_superuser', False):
+            raise PermissionDenied("Permission denied")
 
         if not form_submission:
             raise ValueError("FormSubmission is required")
@@ -156,5 +182,7 @@ class FormSubmissionService(BaseService):
         if form_submission.submitted_by and form_submission.submitted_by != self.user:
             raise PermissionDenied("Only the creator can delete their draft submission")
 
-        form_submission.delete()
+        # Soft delete by setting validity_to
+        form_submission.validity_to = timezone.now()
+        form_submission.save()
         return form_submission
