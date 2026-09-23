@@ -160,7 +160,19 @@ class FormDefinitionGQLTest(openIMISGraphQLTestCase):
         self.assert_mutation_error(internal_id, "Name and schema are required")
 
     def test_create_form_definition_mutation_unauthenticated(self):
-        """Test createFormDefinition mutation fails for anonymous user"""
+        """La mutation anonyme est refusee avant tout ecrit, pas apres.
+
+        Ce test attendait l'ancien comportement : la mutation s'executait, ecrivait
+        une ligne `MutationLog` et y consignait l'erreur d'authentification. Depuis
+        la garde de `OpenIMISMutation.mutate_and_get_payload` (`core/schema.py`,
+        "AuthenticationRequired is a JSONWebTokenError, which the GraphQL view maps
+        to HTTP 401"), un appelant anonyme est rejete **avant** la creation du
+        `MutationLog` - precisement pour qu'il ne puisse plus faire ecrire une ligne
+        dont il controle le `json_content`, ni occuper un worker, sans identifiants.
+
+        On verifie donc les deux moities de cette garantie : le 401 code
+        UNAUTHENTICATED, et l'absence de toute ligne de journal.
+        """
         mutation = """
         mutation createFormDefinition($input: CreateFormDefinitionMutationInput!) {
             createFormDefinition(input: $input) {
@@ -177,17 +189,22 @@ class FormDefinitionGQLTest(openIMISGraphQLTestCase):
             }
         }
 
-        # Send with empty token (anonymous), get internalId from raw response
-        response = self.send_mutation_raw(
-            mutation,
-            token='',
-            variables_param=variables,
-            follow=False,
-        )
+        logs_before = MutationLog.objects.count()
+        # `send_mutation_raw` ne convient pas ici : il asserte un 200 sans erreur.
+        response = self.query(mutation, variables=variables)
 
-        internal_id = response['data']['createFormDefinition']['internalId']
-        # Mutation log should contain an auth error
-        self.assert_mutation_error(internal_id, "User must be authenticated")
+        self.assertEqual(response.status_code, 401)
+        content = response.json()
+        self.assertIn("errors", content)
+        self.assertEqual(
+            content["errors"][0]["extensions"]["code"], "UNAUTHENTICATED"
+        )
+        self.assertEqual(
+            MutationLog.objects.count(),
+            logs_before,
+            "un appelant anonyme ne doit pas pouvoir faire ecrire une ligne de journal",
+        )
+        self.assertFalse(FormDefinition.objects.filter(name="Should Fail").exists())
 
     def test_update_form_definition_mutation_success(self):
         """Test updateFormDefinition mutation updates a record"""
