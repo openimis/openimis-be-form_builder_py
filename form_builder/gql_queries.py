@@ -25,10 +25,12 @@ class FormDefinitionGQLType(DjangoObjectType):
 
     @classmethod
     def get_queryset(cls, queryset, info):
-        # is_deleted=None: FormDefinition is an OpenIMISBusinessModel, which
-        # marks deletion with `validity_to` rather than an is_deleted column,
-        # so the default soft-delete clause would raise FieldError here.
-        return FormDefinition.objects.filter(*append_validity_filter(is_deleted=None))
+        # model=: FormDefinition is an OpenIMISBusinessModel, which marks
+        # deletion with `active` rather than an is_deleted column. Passing the
+        # model lets append_validity_filter emit the right one - active=True
+        # here - instead of the is_deleted default, which would raise
+        # FieldError on this family.
+        return FormDefinition.objects.filter(*append_validity_filter(model=FormDefinition))
 
 
 class FormSubmissionGQLType(DjangoObjectType):
@@ -63,5 +65,5 @@ class FormSubmissionGQLType(DjangoObjectType):
 
     @classmethod
     def get_queryset(cls, queryset, info):
-        # See FormDefinitionGQLType: legacy model, no is_deleted column.
-        return FormSubmission.objects.filter(*append_validity_filter(is_deleted=None))
+        # See FormDefinitionGQLType: legacy model, scoped on `active`.
+        return FormSubmission.objects.filter(*append_validity_filter(model=FormSubmission))
